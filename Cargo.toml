@@ -1,0 +1,9 @@
+[package]
+name = "jp_word_segment"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lindera = { version = "0.32.2", features = ["ipadic"] }
+eframe = "*"
+rfd = "*"

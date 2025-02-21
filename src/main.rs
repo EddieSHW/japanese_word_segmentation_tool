@@ -1,53 +1,27 @@
 use eframe::egui;
-use lindera::Mode;
-use lindera::{DictionaryConfig, DictionaryKind};
-use lindera::{Tokenizer, TokenizerConfig};
+use jp_word_segment::TokenizerCore;
 use rfd::FileDialog;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 
 fn main() -> Result<(), eframe::Error> {
-    let dictionary = DictionaryConfig {
-        kind: Some(DictionaryKind::IPADIC),
-        path: None,
-    };
-
-    let config = TokenizerConfig {
-        dictionary,
-        user_dictionary: None,
-        mode: Mode::Normal,
-    };
-
-    // create tokenizer
-    let tokenizer = Tokenizer::from_config(config).expect("Failed to create tokenizer");
-
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "日本語形態素解析アプリ",
         native_options,
-        Box::new(|cc| Box::new(MyApp::new(cc, tokenizer))),
+        Box::new(|cc| Box::new(TokenizerApp::new(cc))),
     )?;
 
     Ok(())
 }
 
-struct MyApp {
-    tokenizer: Tokenizer,
-    input_text: String,
-    tokens: Vec<TokenInfo>,
-    word_frequencies: HashMap<String, usize>,
-    file_path: Option<String>,
+/// GUIアプリケーションの構造体
+struct TokenizerApp {
+    core: TokenizerCore,
 }
 
-#[derive(Debug, Clone)]
-struct TokenInfo {
-    text: String,
-    pos: String,
-}
-
-impl MyApp {
-    fn new(cc: &eframe::CreationContext<'_>, tokenizer: Tokenizer) -> Self {
+impl TokenizerApp {
+    /// 新しいTokenizerAppインスタンスを作成
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // フォントの設定
         let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert(
             "noto_sans_jp".to_owned(),
@@ -64,67 +38,56 @@ impl MyApp {
         cc.egui_ctx.set_fonts(fonts);
 
         Self {
-            tokenizer,
-            input_text: String::new(),
-            tokens: Vec::new(),
-            word_frequencies: HashMap::new(),
-            file_path: None,
+            core: TokenizerCore::new().expect("Failed to initialize TokenizerCore"),
         }
-    }
-
-    fn analyze_text(&mut self) {
-        self.tokens.clear();
-        self.word_frequencies.clear();
-
-        if let Ok(tokens) = self.tokenizer.tokenize(&self.input_text) {
-            for mut token in tokens {
-                let text = token.text.to_string();
-                let pos = token.get_details().unwrap()[0].to_string();
-
-                self.tokens.push(TokenInfo {
-                    text: text.clone(),
-                    pos,
-                });
-
-                *self.word_frequencies.entry(text).or_insert(0) += 1;
-            }
-        }
-    }
-
-    fn load_file(&mut self) -> Result<(), std::io::Error> {
-        if let Some(path) = FileDialog::new().pick_file() {
-            let mut file = File::open(&path)?;
-            let mut content = String::new();
-            file.read_to_string(&mut content)?;
-            self.input_text = content;
-            self.file_path = Some(path.to_string_lossy().into_owned());
-        }
-        Ok(())
     }
 }
 
-impl eframe::App for MyApp {
+impl eframe::App for TokenizerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("日本語形態素解析");
 
+            // ファイル読み込みボタン
             if ui.button("ファイルを開く").clicked() {
-                if let Err(e) = self.load_file() {
-                    eprintln!("ファイル読み込みエラー: {}", e);
+                if let Some(path) = FileDialog::new().pick_file() {
+                    if let Err(e) = self.core.load_file(path) {
+                        eprintln!("ファイル読み込みエラー: {}", e);
+                    }
                 }
             }
 
-            if let Some(path) = &self.file_path {
+            // 読み込んだファイルパスの表示
+            if let Some(path) = &self.core.file_path {
                 ui.label(format!("読み込んだファイル: {}", path));
             }
 
-            ui.text_edit_multiline(&mut self.input_text);
+            // テキスト入力エリア
+            ui.text_edit_multiline(&mut self.core.input_text);
+
+            // 解析ボタン
             if ui.button("解析").clicked() {
-                self.analyze_text();
+                self.core.analyze_text();
+            }
+
+            // CSV保存ボタン
+            if !self.core.tokens.is_empty() {
+                if ui.button("CSVファイルに保存").clicked() {
+                    if let Some(path) = FileDialog::new()
+                        .add_filter("CSV", &["csv"])
+                        .set_file_name("morphological_analysis.csv")
+                        .save_file()
+                    {
+                        if let Err(e) = self.core.save_to_csv(path) {
+                            eprintln!("CSV保存エラー: {}", e);
+                        }
+                    }
+                }
             }
 
             ui.separator();
 
+            // 解析結果の表示
             egui::ScrollArea::vertical().show(ui, |ui| {
                 egui::Grid::new("tokens_grid").striped(true).show(ui, |ui| {
                     ui.heading("単語");
@@ -132,11 +95,12 @@ impl eframe::App for MyApp {
                     ui.heading("頻度");
                     ui.end_row();
 
-                    for info in &self.tokens {
+                    for info in &self.core.tokens {
                         ui.label(&info.text);
                         ui.label(&info.pos);
                         ui.label(
-                            self.word_frequencies
+                            self.core
+                                .word_frequencies
                                 .get(&info.text)
                                 .unwrap_or(&0)
                                 .to_string(),

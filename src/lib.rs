@@ -10,6 +10,15 @@ pub struct TokenInfo {
     pub pos: String,  // 品詞
 }
 
+/// コンコーダンス結果を格納する構造体
+#[derive(Debug, Clone)]
+pub struct ConcordanceResult {
+    pub keyword: String,       // 検索キーワード
+    pub left_context: String,  // 左文脈
+    pub right_context: String, // 右文脈
+    pub line_number: usize,    // 行番号
+}
+
 /// アプリケーションのメインロジックを管理する構造体
 pub struct TokenizerCore {
     pub tokenizer: Tokenizer,
@@ -96,5 +105,51 @@ impl TokenizerCore {
         }
 
         Ok(())
+    }
+
+    /// コンコーダンス検索を実行
+    pub fn search_concordance(&self, keyword: &str, context_size: usize) -> Vec<ConcordanceResult> {
+        let mut results = Vec::new();
+        let lines: Vec<&str> = self.input_text.lines().collect();
+
+        for (line_num, line) in lines.iter().enumerate() {
+            if let Ok(tokens) = self.tokenizer.tokenize(line) {
+                for (i, token) in tokens.iter().enumerate() {
+                    if token.text == keyword {
+                        let mut left_context = String::new();
+                        let mut right_context = String::new();
+
+                        // 左文脈の取得
+                        let start = if i > context_size {
+                            i - context_size
+                        } else {
+                            0
+                        };
+                        for t in &tokens[start..i] {
+                            left_context.push_str(&t.text);
+                        }
+
+                        // 右文脈の取得
+                        let end = if i + context_size < tokens.len() {
+                            i + context_size
+                        } else {
+                            tokens.len()
+                        };
+                        for t in &tokens[i + 1..end] {
+                            right_context.push_str(&t.text);
+                        }
+
+                        results.push(ConcordanceResult {
+                            keyword: keyword.to_string(),
+                            left_context,
+                            right_context,
+                            line_number: line_num + 1,
+                        });
+                    }
+                }
+            }
+        }
+
+        results
     }
 }

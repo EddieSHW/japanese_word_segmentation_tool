@@ -1,5 +1,5 @@
 use eframe::egui;
-use jp_word_segment::TokenizerCore;
+use jp_word_segment::{ConcordanceResult, TokenizerCore};
 use rfd::FileDialog;
 
 fn main() -> Result<(), eframe::Error> {
@@ -16,6 +16,10 @@ fn main() -> Result<(), eframe::Error> {
 /// GUIアプリケーションの構造体
 struct TokenizerApp {
     core: TokenizerCore,
+    search_keyword: String,
+    context_size: usize,
+    concordance_results: Vec<ConcordanceResult>,
+    show_concordance: bool,
 }
 
 impl TokenizerApp {
@@ -39,6 +43,10 @@ impl TokenizerApp {
 
         Self {
             core: TokenizerCore::new().expect("Failed to initialize TokenizerCore"),
+            search_keyword: String::new(),
+            context_size: 5,
+            concordance_results: Vec::new(),
+            show_concordance: false,
         }
     }
 }
@@ -84,6 +92,53 @@ impl eframe::App for TokenizerApp {
                     }
                 }
             }
+
+            ui.separator();
+
+            // コンコーダンス検索セクション
+            ui.collapsing("コンコーダンス検索", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("検索キーワード:");
+                    ui.text_edit_singleline(&mut self.search_keyword);
+                    ui.label("文脈サイズ:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.context_size)
+                            .speed(1.0)
+                            .clamp_range(1..=20),
+                    );
+                });
+
+                if ui.button("検索").clicked() && !self.search_keyword.is_empty() {
+                    self.concordance_results = self
+                        .core
+                        .search_concordance(&self.search_keyword, self.context_size);
+                    self.show_concordance = true;
+                }
+
+                if self.show_concordance {
+                    ui.label(format!("検索結果: {}件", self.concordance_results.len()));
+
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        egui::Grid::new("concordance_grid")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.heading("行番号");
+                                ui.heading("左文脈");
+                                ui.heading("キーワード");
+                                ui.heading("右文脈");
+                                ui.end_row();
+
+                                for result in &self.concordance_results {
+                                    ui.label(result.line_number.to_string());
+                                    ui.label(&result.left_context);
+                                    ui.label(&result.keyword);
+                                    ui.label(&result.right_context);
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                }
+            });
 
             ui.separator();
 

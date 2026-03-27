@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-lindera = { version = "0.32.2", features = ["ipadic"] }
+lindera = { version = "2.3.2", features = ["embed-ipadic"] }
 eframe = "*"
 rfd = "*"
+serde_json = "1"

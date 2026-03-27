@@ -1,4 +1,5 @@
-use lindera::{DictionaryConfig, DictionaryKind, Mode, Tokenizer, TokenizerConfig};
+use lindera::tokenizer::{Tokenizer, TokenizerConfig};
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -31,19 +32,17 @@ pub struct TokenizerCore {
 impl TokenizerCore {
     /// 新しいTokenizerCoreインスタンスを作成
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let dictionary = DictionaryConfig {
-            kind: Some(DictionaryKind::IPADIC),
-            path: None,
-        };
-
-        let config = TokenizerConfig {
-            dictionary,
-            user_dictionary: None,
-            mode: Mode::Normal,
-        };
+        let config: TokenizerConfig = json!({
+            "segmenter": {
+                "dictionary": "embedded://ipadic",
+                "mode": "normal"
+            },
+            "character_filters": [],
+            "token_filters": []
+        });
 
         // Tokenizerの初期化
-        let tokenizer = Tokenizer::from_config(config)?;
+        let tokenizer = Tokenizer::from_config(&config)?;
 
         Ok(Self {
             tokenizer,
@@ -61,8 +60,8 @@ impl TokenizerCore {
 
         if let Ok(tokens) = self.tokenizer.tokenize(&self.input_text) {
             for mut token in tokens {
-                let text = token.text.to_string();
-                let pos = token.get_details().unwrap()[0].to_string();
+                let text = token.surface.to_string();
+                let pos = token.get_detail(0).unwrap_or("*").to_string();
 
                 self.tokens.push(TokenInfo {
                     text: text.clone(),
@@ -115,7 +114,7 @@ impl TokenizerCore {
         for (line_num, line) in lines.iter().enumerate() {
             if let Ok(tokens) = self.tokenizer.tokenize(line) {
                 for (i, token) in tokens.iter().enumerate() {
-                    if token.text == keyword {
+                    if token.surface == keyword {
                         let mut left_context = String::new();
                         let mut right_context = String::new();
 
@@ -126,7 +125,7 @@ impl TokenizerCore {
                             0
                         };
                         for t in &tokens[start..i] {
-                            left_context.push_str(&t.text);
+                            left_context.push_str(&t.surface);
                         }
 
                         // 右文脈の取得
@@ -136,7 +135,7 @@ impl TokenizerCore {
                             tokens.len()
                         };
                         for t in &tokens[i + 1..end] {
-                            right_context.push_str(&t.text);
+                            right_context.push_str(&t.surface);
                         }
 
                         results.push(ConcordanceResult {

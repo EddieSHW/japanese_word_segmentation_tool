@@ -1,8 +1,9 @@
 use lindera::tokenizer::{Tokenizer, TokenizerConfig};
 use serde_json::json;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufWriter, Write};
 
 /// 形態素解析結果を格納する構造体
 #[derive(Debug, Clone)]
@@ -23,10 +24,10 @@ pub struct ConcordanceResult {
 /// 共起ネットワークの計算条件
 #[derive(Debug, Clone)]
 pub struct CooccurrenceConfig {
-    pub target_pos: Vec<String>,    // 対象品詞 (例: ["名詞", "動詞", "形容詞"])
-    pub min_word_freq: usize,       // 最小単語頻度
-    pub min_edge_count: usize,      // 最小共起回数
-    pub max_nodes: usize,           // 最大ノード数 (頻度上位)
+    pub target_pos: Vec<String>, // 対象品詞 (例: ["名詞", "動詞", "形容詞"])
+    pub min_word_freq: usize,    // 最小単語頻度
+    pub min_edge_count: usize,   // 最小共起回数
+    pub max_nodes: usize,        // 最大ノード数 (頻度上位)
     pub stopwords: HashSet<String>, // 除外単語
 }
 
@@ -64,7 +65,19 @@ pub struct CooccurrenceNetwork {
     pub edges: Vec<CooccurrenceEdge>,
 }
 
-/// 入力テキストを文単位に分割する (。!?。改行 を区切りとして使用)
+/// CSV のフィールドをエスケープする (RFC 4180)
+///
+/// カンマ・ダブルクォート・改行を含む場合はダブルクォートで囲み、
+/// 内部のダブルクォートは 2 つ重ねる。
+fn escape_csv_field(field: &str) -> Cow<'_, str> {
+    if field.contains([',', '"', '\n', '\r']) {
+        Cow::Owned(format!("\"{}\"", field.replace('"', "\"\"")))
+    } else {
+        Cow::Borrowed(field)
+    }
+}
+
+/// 入力テキストを文単位に分割する (。．!！?？ と改行を区切りとして使用)
 fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current = String::new();
@@ -141,10 +154,12 @@ impl TokenizerCore {
 
     /// ファイルからテキストを読み込む
     pub fn load_file(&mut self, path: std::path::PathBuf) -> Result<(), std::io::Error> {
-        let mut file = File::open(&path)?;
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-        self.input_text = content;
+        let content = std::fs::read_to_string(&path)?;
+        // UTF-8 BOM が付いているとトークンとして解析されてしまうため取り除く
+        self.input_text = match content.strip_prefix('\u{feff}') {
+            Some(stripped) => stripped.to_string(),
+            None => content,
+        };
         self.file_path = Some(path.to_string_lossy().into_owned());
         Ok(())
     }
@@ -155,18 +170,29 @@ impl TokenizerCore {
             return Ok(());
         }
 
-        let mut file = File::create(path)?;
+        let mut writer = BufWriter::new(File::create(path)?);
+        self.write_csv(&mut writer)?;
+        writer.flush()
+    }
 
+    /// 解析結果を CSV 形式で書き出す
+    pub fn write_csv<W: Write>(&self, mut writer: W) -> Result<(), std::io::Error> {
         // UTF-8 BOMを書き込み（Excel対応）
-        file.write_all(&[0xEF, 0xBB, 0xBF])?;
+        writer.write_all(&[0xEF, 0xBB, 0xBF])?;
 
         // ヘッダーを書き込み
-        writeln!(file, "単語,品詞,出現頻度")?;
+        writeln!(writer, "単語,品詞,出現頻度")?;
 
         // データを書き込み
         for info in &self.tokens {
             let frequency = self.word_frequencies.get(&info.text).unwrap_or(&0);
-            writeln!(file, "{},{},{}", info.text, info.pos, frequency)?;
+            writeln!(
+                writer,
+                "{},{},{}",
+                escape_csv_field(&info.text),
+                escape_csv_field(&info.pos),
+                frequency
+            )?;
         }
 
         Ok(())
@@ -247,7 +273,12 @@ impl TokenizerCore {
                 count,
             })
             .collect();
-        edges.sort_by(|a, b| b.count.cmp(&a.count));
+        // HashMap の走査順に依存しないよう、同数の場合はノード番号順に並べる
+        edges.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| (a.source, a.target).cmp(&(b.source, b.target)))
+        });
 
         CooccurrenceNetwork { nodes, edges }
     }
@@ -264,22 +295,14 @@ impl TokenizerCore {
                         let mut left_context = String::new();
                         let mut right_context = String::new();
 
-                        // 左文脈の取得
-                        let start = if i > context_size {
-                            i - context_size
-                        } else {
-                            0
-                        };
+                        // 左文脈の取得 (キーワード直前の最大 context_size 語)
+                        let start = i.saturating_sub(context_size);
                         for t in &tokens[start..i] {
                             left_context.push_str(&t.surface);
                         }
 
-                        // 右文脈の取得
-                        let end = if i + context_size < tokens.len() {
-                            i + context_size
-                        } else {
-                            tokens.len()
-                        };
+                        // 右文脈の取得 (キーワード直後の最大 context_size 語)
+                        let end = (i + 1 + context_size).min(tokens.len());
                         for t in &tokens[i + 1..end] {
                             right_context.push_str(&t.surface);
                         }
@@ -296,5 +319,159 @@ impl TokenizerCore {
         }
 
         results
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn core_with(text: &str) -> TokenizerCore {
+        let mut core = TokenizerCore::new().expect("Failed to initialize TokenizerCore");
+        core.input_text = text.to_string();
+        core
+    }
+
+    fn noun_config() -> CooccurrenceConfig {
+        CooccurrenceConfig {
+            target_pos: vec!["名詞".to_string()],
+            min_word_freq: 1,
+            min_edge_count: 1,
+            max_nodes: 10,
+            stopwords: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn split_sentences_splits_on_punctuation_and_newlines() {
+        assert_eq!(
+            split_sentences("今日は晴れ。明日は雨！\r\n\nどう？最後"),
+            vec!["今日は晴れ", "明日は雨", "どう", "最後"]
+        );
+    }
+
+    #[test]
+    fn escape_csv_field_quotes_only_when_needed() {
+        assert_eq!(escape_csv_field("名詞"), "名詞");
+        assert_eq!(escape_csv_field(","), "\",\"");
+        assert_eq!(escape_csv_field("a\"b"), "\"a\"\"b\"");
+        assert_eq!(escape_csv_field("a\nb"), "\"a\nb\"");
+    }
+
+    #[test]
+    fn analyze_text_counts_word_frequencies() {
+        let mut core = core_with("山へ行く。山を見る。");
+        core.analyze_text();
+        assert_eq!(core.word_frequencies.get("山"), Some(&2));
+        assert!(core
+            .tokens
+            .iter()
+            .any(|t| t.text == "山" && t.pos == "名詞"));
+    }
+
+    #[test]
+    fn concordance_context_has_requested_size_on_both_sides() {
+        let core = core_with("今日は良い天気です。");
+
+        let results = core.search_concordance("良い", 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].left_context, "は");
+        assert_eq!(results[0].right_context, "天気");
+
+        let results = core.search_concordance("良い", 2);
+        assert_eq!(results[0].left_context, "今日は");
+        assert_eq!(results[0].right_context, "天気です");
+    }
+
+    #[test]
+    fn concordance_context_is_clamped_at_line_edges() {
+        let core = core_with("今日は良い天気です。");
+        let results = core.search_concordance("良い", 20);
+        assert_eq!(results[0].left_context, "今日は");
+        assert_eq!(results[0].right_context, "天気です。");
+    }
+
+    #[test]
+    fn concordance_reports_line_numbers() {
+        let core = core_with("山へ行く\n川へ行く\n山を見る");
+        let lines: Vec<usize> = core
+            .search_concordance("山", 2)
+            .iter()
+            .map(|r| r.line_number)
+            .collect();
+        assert_eq!(lines, vec![1, 3]);
+    }
+
+    #[test]
+    fn csv_output_escapes_commas_and_quotes() {
+        let mut core = core_with("");
+        for (text, pos) in [("山", "名詞"), (",", "記号"), ("\"", "記号")] {
+            core.tokens.push(TokenInfo {
+                text: text.to_string(),
+                pos: pos.to_string(),
+            });
+            core.word_frequencies.insert(text.to_string(), 1);
+        }
+
+        let mut buf = Vec::new();
+        core.write_csv(&mut buf).unwrap();
+        let csv = String::from_utf8(buf).unwrap();
+
+        assert_eq!(
+            csv,
+            "\u{feff}単語,品詞,出現頻度\n山,名詞,1\n\",\",記号,1\n\"\"\"\",記号,1\n"
+        );
+    }
+
+    #[test]
+    fn load_file_strips_utf8_bom() {
+        let path = std::env::temp_dir().join(format!(
+            "jp_word_segment_bom_test_{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "\u{feff}山へ行く").unwrap();
+        let mut core = TokenizerCore::new().unwrap();
+        let result = core.load_file(path.clone());
+        std::fs::remove_file(&path).ok();
+
+        result.unwrap();
+        assert_eq!(core.input_text, "山へ行く");
+    }
+
+    #[test]
+    fn cooccurrence_counts_each_pair_once_per_sentence() {
+        let core = core_with("猫と犬と猫。猫と犬。鳥。");
+        let network = core.compute_cooccurrence(&noun_config());
+        let idx = |w: &str| network.nodes.iter().position(|n| n.word == w).unwrap();
+        let (cat, dog, bird) = (idx("猫"), idx("犬"), idx("鳥"));
+
+        assert_eq!(network.nodes[cat].frequency, 3);
+        let edge = network
+            .edges
+            .iter()
+            .find(|e| (e.source, e.target) == (cat.min(dog), cat.max(dog)))
+            .expect("猫-犬 のエッジがない");
+        assert_eq!(edge.count, 2);
+        assert!(network
+            .edges
+            .iter()
+            .all(|e| e.source != bird && e.target != bird));
+    }
+
+    #[test]
+    fn cooccurrence_applies_stopwords_and_max_nodes() {
+        let core = core_with("猫と犬。猫と鳥。猫と犬。");
+
+        let mut config = noun_config();
+        config.stopwords.insert("犬".to_string());
+        let network = core.compute_cooccurrence(&config);
+        assert!(network.nodes.iter().all(|n| n.word != "犬"));
+
+        let mut config = noun_config();
+        config.max_nodes = 1;
+        let network = core.compute_cooccurrence(&config);
+        assert_eq!(network.nodes.len(), 1);
+        assert_eq!(network.nodes[0].word, "猫");
+        assert!(network.edges.is_empty());
     }
 }

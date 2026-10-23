@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 lindera = { version = "2.3.2", features = ["embed-ipadic"] }
-eframe = "*"
-rfd = "*"
+eframe = "0.22"
+egui_extras = { version = "0.22", default-features = false }
+rfd = "0.11"
 serde_json = "1"

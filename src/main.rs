@@ -1,12 +1,25 @@
 use eframe::egui;
-use jp_word_segment::{
-    ConcordanceResult, CooccurrenceConfig, CooccurrenceNetwork, TokenizerCore,
-};
+use egui_extras::{Column, TableBuilder};
+use jp_word_segment::{ConcordanceResult, CooccurrenceConfig, CooccurrenceNetwork, TokenizerCore};
 use rfd::FileDialog;
 use std::collections::HashSet;
 
+/// テキスト入力エリアの最大高さ (長文でも他の UI を押し出さないようにする)
+const INPUT_MAX_HEIGHT: f32 = 200.0;
+/// コンコーダンス検索結果の最大高さ
+const CONCORDANCE_MAX_HEIGHT: f32 = 300.0;
+/// 共起ネットワークのレイアウト温度の 1 ステップごとの減衰率
+const LAYOUT_COOLING: f32 = 0.98;
+/// レイアウト温度がこれを下回ったら収束とみなして停止する
+const LAYOUT_MIN_TEMPERATURE: f32 = 0.005;
+/// 「レイアウト再開」時の温度
+const LAYOUT_REHEAT_TEMPERATURE: f32 = 0.3;
+
 fn main() -> Result<(), eframe::Error> {
-    let native_options = eframe::NativeOptions::default();
+    let native_options = eframe::NativeOptions {
+        initial_window_size: Some(egui::vec2(1024.0, 768.0)),
+        ..Default::default()
+    };
     eframe::run_native(
         "日本語形態素解析アプリ",
         native_options,
@@ -14,6 +27,28 @@ fn main() -> Result<(), eframe::Error> {
     )?;
 
     Ok(())
+}
+
+/// 画面に表示する処理結果のメッセージ
+struct StatusMessage {
+    text: String,
+    is_error: bool,
+}
+
+impl StatusMessage {
+    fn info(text: String) -> Self {
+        Self {
+            text,
+            is_error: false,
+        }
+    }
+
+    fn error(text: String) -> Self {
+        Self {
+            text,
+            is_error: true,
+        }
+    }
 }
 
 /// GUIアプリケーションの構造体
@@ -24,6 +59,7 @@ struct TokenizerApp {
     concordance_results: Vec<ConcordanceResult>,
     show_concordance: bool,
     network_view: NetworkView,
+    status: Option<StatusMessage>,
 }
 
 impl TokenizerApp {
@@ -52,6 +88,7 @@ impl TokenizerApp {
             concordance_results: Vec::new(),
             show_concordance: false,
             network_view: NetworkView::default(),
+            status: None,
         }
     }
 }
@@ -64,9 +101,18 @@ impl eframe::App for TokenizerApp {
             // ファイル読み込みボタン
             if ui.button("ファイルを開く").clicked() {
                 if let Some(path) = FileDialog::new().pick_file() {
-                    if let Err(e) = self.core.load_file(path) {
-                        eprintln!("ファイル読み込みエラー: {}", e);
-                    }
+                    self.status = match self.core.load_file(path) {
+                        Ok(()) => None,
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                            Some(StatusMessage::error(
+                                "ファイル読み込みエラー: UTF-8 のテキストファイルではありません（Shift_JIS などは UTF-8 に変換してください）".to_string(),
+                            ))
+                        }
+                        Err(e) => Some(StatusMessage::error(format!(
+                            "ファイル読み込みエラー: {}",
+                            e
+                        ))),
+                    };
                 }
             }
 
@@ -76,26 +122,49 @@ impl eframe::App for TokenizerApp {
             }
 
             // テキスト入力エリア
-            ui.text_edit_multiline(&mut self.core.input_text);
+            egui::ScrollArea::vertical()
+                .id_source("input_text")
+                .max_height(INPUT_MAX_HEIGHT)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.core.input_text)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
 
-            // 解析ボタン
-            if ui.button("解析").clicked() {
-                self.core.analyze_text();
-            }
+            ui.horizontal(|ui| {
+                // 解析ボタン
+                if ui.button("解析").clicked() {
+                    self.core.analyze_text();
+                }
 
-            // CSV保存ボタン
-            if !self.core.tokens.is_empty() {
-                if ui.button("CSVファイルに保存").clicked() {
+                // CSV保存ボタン
+                if !self.core.tokens.is_empty() && ui.button("CSVファイルに保存").clicked() {
                     if let Some(path) = FileDialog::new()
                         .add_filter("CSV", &["csv"])
                         .set_file_name("morphological_analysis.csv")
                         .save_file()
                     {
-                        if let Err(e) = self.core.save_to_csv(path) {
-                            eprintln!("CSV保存エラー: {}", e);
-                        }
+                        let display_path = path.display().to_string();
+                        self.status = Some(match self.core.save_to_csv(path) {
+                            Ok(()) => StatusMessage::info(format!(
+                                "CSVファイルを保存しました: {}",
+                                display_path
+                            )),
+                            Err(e) => StatusMessage::error(format!("CSV保存エラー: {}", e)),
+                        });
                     }
                 }
+            });
+
+            // 処理結果のメッセージ
+            if let Some(status) = &self.status {
+                let color = if status.is_error {
+                    ui.visuals().error_fg_color
+                } else {
+                    ui.visuals().text_color()
+                };
+                ui.colored_label(color, &status.text);
             }
 
             ui.separator();
@@ -113,35 +182,16 @@ impl eframe::App for TokenizerApp {
                     );
                 });
 
-                if ui.button("検索").clicked() && !self.search_keyword.is_empty() {
-                    self.concordance_results = self
-                        .core
-                        .search_concordance(&self.search_keyword, self.context_size);
+                let keyword = self.search_keyword.trim();
+                if ui.button("検索").clicked() && !keyword.is_empty() {
+                    self.concordance_results =
+                        self.core.search_concordance(keyword, self.context_size);
                     self.show_concordance = true;
                 }
 
                 if self.show_concordance {
                     ui.label(format!("検索結果: {}件", self.concordance_results.len()));
-
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        egui::Grid::new("concordance_grid")
-                            .striped(true)
-                            .show(ui, |ui| {
-                                ui.heading("行番号");
-                                ui.heading("左文脈");
-                                ui.heading("キーワード");
-                                ui.heading("右文脈");
-                                ui.end_row();
-
-                                for result in &self.concordance_results {
-                                    ui.label(result.line_number.to_string());
-                                    ui.label(&result.left_context);
-                                    ui.label(&result.keyword);
-                                    ui.label(&result.right_context);
-                                    ui.end_row();
-                                }
-                            });
-                    });
+                    self.concordance_table(ui);
                 }
             });
 
@@ -159,36 +209,105 @@ impl eframe::App for TokenizerApp {
             ui.separator();
 
             // 解析結果の表示
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("tokens_grid").striped(true).show(ui, |ui| {
-                    ui.heading("単語");
-                    ui.heading("品詞");
-                    ui.heading("頻度");
-                    ui.end_row();
+            self.tokens_table(ui);
+        });
+    }
+}
 
-                    for info in &self.core.tokens {
+impl TokenizerApp {
+    /// コンコーダンス検索結果の表 (KWIC 形式)
+    fn concordance_table(&self, ui: &mut egui::Ui) {
+        let header_height = ui.text_style_height(&egui::TextStyle::Heading);
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .max_scroll_height(CONCORDANCE_MAX_HEIGHT)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::initial(60.0).at_least(40.0))
+            .column(Column::initial(240.0).at_least(60.0).clip(true))
+            .column(Column::initial(100.0).at_least(40.0))
+            .column(Column::remainder().at_least(60.0).clip(true))
+            .header(header_height, |mut header| {
+                for title in ["行番号", "左文脈", "キーワード", "右文脈"] {
+                    header.col(|ui| {
+                        ui.heading(title);
+                    });
+                }
+            })
+            .body(|body| {
+                // 表示範囲の行だけを描画する
+                body.rows(
+                    row_height,
+                    self.concordance_results.len(),
+                    |index, mut row| {
+                        let result = &self.concordance_results[index];
+                        row.col(|ui| {
+                            ui.label(result.line_number.to_string());
+                        });
+                        row.col(|ui| {
+                            // キーワードに接する側に寄せて表示する
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(&result.left_context);
+                                },
+                            );
+                        });
+                        row.col(|ui| {
+                            ui.strong(&result.keyword);
+                        });
+                        row.col(|ui| {
+                            ui.label(&result.right_context);
+                        });
+                    },
+                );
+            });
+    }
+
+    /// 形態素解析結果の表
+    fn tokens_table(&self, ui: &mut egui::Ui) {
+        let header_height = ui.text_style_height(&egui::TextStyle::Heading);
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::initial(200.0).at_least(60.0).clip(true))
+            .column(Column::initial(120.0).at_least(60.0))
+            .column(Column::remainder().at_least(60.0))
+            .header(header_height, |mut header| {
+                for title in ["単語", "品詞", "頻度"] {
+                    header.col(|ui| {
+                        ui.heading(title);
+                    });
+                }
+            })
+            .body(|body| {
+                // 長文でも重くならないよう、表示範囲の行だけを描画する
+                body.rows(row_height, self.core.tokens.len(), |index, mut row| {
+                    let info = &self.core.tokens[index];
+                    let frequency = self.core.word_frequencies.get(&info.text).unwrap_or(&0);
+                    row.col(|ui| {
                         ui.label(&info.text);
+                    });
+                    row.col(|ui| {
                         ui.label(&info.pos);
-                        ui.label(
-                            self.core
-                                .word_frequencies
-                                .get(&info.text)
-                                .unwrap_or(&0)
-                                .to_string(),
-                        );
-                        ui.end_row();
-                    }
+                    });
+                    row.col(|ui| {
+                        ui.label(frequency.to_string());
+                    });
                 });
             });
-        });
     }
 }
 
 /// 共起ネットワークの表示・操作を行うビュー
 struct NetworkView {
     network: Option<CooccurrenceNetwork>,
-    positions: Vec<egui::Vec2>,    // ワールド座標 (中心0,0)
-    velocities: Vec<egui::Vec2>,
+    positions: Vec<egui::Vec2>, // ワールド座標 (中心0,0)
+    /// レイアウトの温度 (1.0 から減衰し、十分小さくなると停止する)
+    temperature: f32,
     /// 設定 UI 用フィールド
     pos_nouns: bool,
     pos_verbs: bool,
@@ -212,7 +331,7 @@ impl Default for NetworkView {
         Self {
             network: None,
             positions: Vec::new(),
-            velocities: Vec::new(),
+            temperature: 1.0,
             pos_nouns: true,
             pos_verbs: true,
             pos_adjectives: true,
@@ -281,8 +400,8 @@ impl NetworkView {
                 }
             })
             .collect();
-        self.velocities = vec![egui::Vec2::ZERO; n];
         self.network = Some(network);
+        self.temperature = 1.0;
         self.simulating = true;
         self.dragging = None;
         self.drag_offset = egui::Vec2::ZERO;
@@ -337,6 +456,10 @@ impl NetworkView {
                 };
                 if ui.button(label).clicked() {
                     self.simulating = !self.simulating;
+                    if self.simulating {
+                        // 収束して停止した後でも配置が動くよう温度を上げる
+                        self.temperature = self.temperature.max(LAYOUT_REHEAT_TEMPERATURE);
+                    }
                 }
                 if ui.button("配置リセット").clicked() {
                     self.rebuild(core);
@@ -359,6 +482,18 @@ impl NetworkView {
         }
     }
 
+    /// ワールド座標 `target` にあるノードを返す
+    ///
+    /// ノードが重なっている場合は、後に描画される (手前に見える) ノードを優先する。
+    fn node_at(&self, target: egui::Vec2, zoom: f32) -> Option<usize> {
+        let network = self.network.as_ref()?;
+        (0..network.nodes.len()).rev().find(|&i| {
+            let r = node_radius(network.nodes[i].frequency);
+            // ワールド距離 r、加えて画面 4px 分の余白
+            (self.positions[i] - target).length() <= r + 4.0 / zoom
+        })
+    }
+
     fn draw_canvas(&mut self, ui: &mut egui::Ui) {
         let desired_size = egui::vec2(ui.available_width(), 480.0);
         let (response, painter) = ui.allocate_painter(desired_size, egui::Sense::click_and_drag());
@@ -370,7 +505,7 @@ impl NetworkView {
         painter.rect_stroke(
             rect,
             4.0,
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 70)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(60, 60, 70)),
         );
 
         // ズーム (ホバー時のみ)
@@ -385,12 +520,9 @@ impl NetworkView {
         // ローカル変数にスナップショットしてクロージャで使用 (ボローチェッカー対策)
         let mut pan = self.pan;
         let zoom = self.zoom;
-        let to_screen = |w: egui::Vec2, pan: egui::Vec2| -> egui::Pos2 {
-            center + (w + pan) * zoom
-        };
-        let to_world = |s: egui::Pos2, pan: egui::Vec2| -> egui::Vec2 {
-            (s - center) / zoom - pan
-        };
+        let to_screen =
+            |w: egui::Vec2, pan: egui::Vec2| -> egui::Pos2 { center + (w + pan) * zoom };
+        let to_world = |s: egui::Pos2, pan: egui::Vec2| -> egui::Vec2 { (s - center) / zoom - pan };
 
         // ヒットテスト + ドラッグ処理
         let pointer_screen = response.interact_pointer_pos();
@@ -399,17 +531,7 @@ impl NetworkView {
         if response.drag_started() {
             if let Some(p) = pointer_screen {
                 let target = to_world(p, pan);
-                let mut hit: Option<usize> = None;
-                if let Some(network) = &self.network {
-                    for (i, pos) in self.positions.iter().enumerate() {
-                        let r = node_radius(network.nodes[i].frequency);
-                        // ワールド距離 r、加えて画面 4px 分の余白
-                        if (*pos - target).length() <= r + 4.0 / zoom {
-                            hit = Some(i);
-                            break;
-                        }
-                    }
-                }
+                let hit = self.node_at(target, zoom);
                 self.dragging = hit;
                 // 押下位置とノード中心のオフセットを保持しテレポートを防ぐ
                 self.drag_offset = match hit {
@@ -423,9 +545,6 @@ impl NetworkView {
         if response.dragged() {
             if let (Some(idx), Some(p)) = (self.dragging, pointer_screen) {
                 self.positions[idx] = to_world(p, pan) + self.drag_offset;
-                if idx < self.velocities.len() {
-                    self.velocities[idx] = egui::Vec2::ZERO;
-                }
             } else {
                 // 空白部分のドラッグ → パン
                 let delta = response.drag_delta();
@@ -442,18 +561,7 @@ impl NetworkView {
         if response.clicked() {
             // interact_pointer_pos は press 位置を返すので click 判定にも妥当
             if let Some(p) = pointer_screen.or(hover_screen) {
-                let target = to_world(p, pan);
-                let mut hit: Option<usize> = None;
-                if let Some(network) = &self.network {
-                    for (i, pos) in self.positions.iter().enumerate() {
-                        let r = node_radius(network.nodes[i].frequency);
-                        if (*pos - target).length() <= r + 4.0 / zoom {
-                            hit = Some(i);
-                            break;
-                        }
-                    }
-                }
-                self.selected = hit;
+                self.selected = self.node_at(to_world(p, pan), zoom);
             }
         }
 
@@ -490,12 +598,7 @@ impl NetworkView {
             }
 
             // 描画: ノード
-            let max_freq = network
-                .nodes
-                .iter()
-                .map(|n| n.frequency)
-                .max()
-                .unwrap_or(1) as f32;
+            let max_freq = network.nodes.iter().map(|n| n.frequency).max().unwrap_or(1) as f32;
             for (i, node) in network.nodes.iter().enumerate() {
                 let p = to_screen(self.positions[i], pan);
                 let r = node_radius(node.frequency) * zoom;
@@ -506,9 +609,9 @@ impl NetworkView {
                     intensity,
                 );
                 let stroke = if Some(i) == highlight {
-                    egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 220, 120))
+                    egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(255, 220, 120))
                 } else {
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(20, 20, 30))
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(20, 20, 30))
                 };
                 painter.circle(p, r, fill, stroke);
 
@@ -534,18 +637,21 @@ impl NetworkView {
         );
     }
 
+    /// 力指向レイアウト (Fruchterman-Reingold 法) を 1 ステップ進める
+    ///
+    /// 1 ステップで動ける距離 (温度) を徐々に下げ、十分下がったら収束とみなして停止する。
     fn step_layout(&mut self, area: egui::Vec2) {
         let Some(network) = &self.network else {
             return;
         };
         let n = network.nodes.len();
         if n < 2 {
+            self.simulating = false;
             return;
         }
 
         // 最適距離 k
         let k = (area.x * area.y / n as f32).sqrt() * 0.35;
-        let dt = 0.6;
 
         let mut forces = vec![egui::Vec2::ZERO; n];
 
@@ -577,24 +683,29 @@ impl NetworkView {
             forces[edge.target] -= dir * f;
         }
 
-        // 中心への弱い引力
-        for i in 0..n {
-            forces[i] += -self.positions[i] * 0.01;
+        // 中心への引力
+        // エッジを持たないノードが反発力で表示領域の外へ押し出されないよう、
+        // 全体が表示領域の約 8 割の楕円に収まる強さを縦横それぞれに設定する
+        let gravity = egui::vec2(area.y, area.x) * (1.53 / (area.x + area.y));
+        for (force, pos) in forces.iter_mut().zip(&self.positions) {
+            *force -= *pos * gravity;
         }
 
-        // 速度・位置更新 (温度減衰付き)
-        let max_speed = 60.0;
-        for i in 0..n {
+        // 位置更新 (1 ステップの移動量を温度で制限する)
+        let max_step = self.temperature * area.x.max(area.y) / 10.0;
+        for (i, force) in forces.iter().enumerate() {
             if Some(i) == self.dragging {
-                self.velocities[i] = egui::Vec2::ZERO;
                 continue;
             }
-            self.velocities[i] = (self.velocities[i] + forces[i] * dt) * 0.82;
-            let speed = self.velocities[i].length();
-            if speed > max_speed {
-                self.velocities[i] *= max_speed / speed;
+            let len = force.length();
+            if len > 0.0 {
+                self.positions[i] += *force * (len.min(max_step) / len);
             }
-            self.positions[i] += self.velocities[i] * dt;
+        }
+
+        self.temperature *= LAYOUT_COOLING;
+        if self.temperature < LAYOUT_MIN_TEMPERATURE {
+            self.simulating = false;
         }
     }
 }
@@ -608,11 +719,9 @@ fn node_radius(freq: usize) -> f32 {
 fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     let lerp = |x: u8, y: u8| -> u8 {
-        (x as f32 * (1.0 - t) + y as f32 * t).round().clamp(0.0, 255.0) as u8
+        (x as f32 * (1.0 - t) + y as f32 * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
     };
-    egui::Color32::from_rgb(
-        lerp(a.r(), b.r()),
-        lerp(a.g(), b.g()),
-        lerp(a.b(), b.b()),
-    )
+    egui::Color32::from_rgb(lerp(a.r(), b.r()), lerp(a.g(), b.g()), lerp(a.b(), b.b()))
 }

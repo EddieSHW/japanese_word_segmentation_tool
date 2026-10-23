@@ -18,22 +18,24 @@
   - 文単位（。!?・改行で分割）で同一文に出現する単語の共起関係をグラフ表示
   - 対象品詞（名詞 / 動詞 / 形容詞 / 副詞）を切り替え可能
   - 最小単語頻度・最小共起回数・最大ノード数・除外単語の設定
-  - 力指向レイアウトによる自動配置（ノードドラッグ・パン・ホイールズーム対応）
+  - 力指向レイアウトによる自動配置（収束すると自動停止。ノードドラッグ・パン・ホイールズーム対応）
   - ノードクリックで関連エッジをハイライト
 - 使いやすい GUI インターフェース
 
 ## 必要要件
 
-- Rust 1.70.0 以上
+- Rust 1.88.0 以上（依存する lindera 2.x の要件）
 - Cargo（Rust のパッケージマネージャー）
+- Linux の場合は GTK3 の開発パッケージ（ファイルダイアログで使用）
+  - Debian / Ubuntu: `sudo apt install libgtk-3-dev`
 
 ## インストール方法
 
 1. このリポジトリをクローン：
 
 ```bash
-git clone https://github.com/EddieSHW/jp_word_segment.git
-cd jp_word_segment
+git clone https://github.com/EddieSHW/japanese_word_segmentation_tool.git
+cd japanese_word_segmentation_tool
 ```
 
 2. 依存パッケージのインストール：
@@ -41,6 +43,8 @@ cd jp_word_segment
 ```bash
 cargo build --release
 ```
+
+初回ビルド時に IPADIC 辞書をダウンロードしてバイナリに埋め込むため、インターネット接続が必要です。
 
 ## 使用方法
 
@@ -69,6 +73,7 @@ cargo run --release
 
 - [lindera](https://github.com/lindera-morphology/lindera) - 形態素解析エンジン
 - [eframe](https://github.com/emilk/egui) - GUI フレームワーク
+- [egui_extras](https://github.com/emilk/egui) - 結果表示用のテーブル
 - [rfd](https://github.com/PolyMeilex/rfd) - ファイルダイアログ
 
 ## ライセンス
@@ -77,7 +82,8 @@ MIT License
 
 ## 注意事項
 
-- 解析結果の CSV ファイルは UTF-8（BOM 付き）で保存されます
+- 読み込むテキストファイルは UTF-8（BOM 付きも可）にしてください。Shift_JIS などのファイルは UTF-8 に変換してから読み込んでください
+- 解析結果の CSV ファイルは UTF-8（BOM 付き）で保存されます。カンマやダブルクォートを含む単語は RFC 4180 に従ってクォートされます
 - 大きなテキストファイルの処理には時間がかかる場合があります
 
 ## 開発者向け情報
@@ -85,8 +91,15 @@ MIT License
 プロジェクト構造：
 
 - `src/main.rs` - GUI アプリケーションの実装
-- `src/lib.rs` - コアロジック（形態素解析、ファイル操作）
+- `src/lib.rs` - コアロジック（形態素解析、ファイル操作）とユニットテスト
+- `tests/santouka.txt` - 動作確認用のサンプルテキスト
 - `Cargo.toml` - 依存関係の管理
+
+テストの実行：
+
+```bash
+cargo test
+```
 
 ## 貢献
 
